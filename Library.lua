@@ -91,23 +91,6 @@ local JumpPower = { Enabled = false, Value = 50, Default = 50 }
 local SilentAim = { Enabled=false, Fov=100, DrawFOV=true, UseFOV=true, Prediction=0 }
 local GunNoclip = { Enabled=false, Delay=0.05, Active=false }
 
-task.spawn(function()
-    while true do
-        local char = LocalPlayer.Character
-        if char then
-            local head = char:FindFirstChild("Head")
-            if head and head.Transparency ~= 1 then
-                head.Transparency              = 1
-                head.LocalTransparencyModifier = 1
-                for _, d in ipairs(head:GetChildren()) do
-                    if d:IsA("Decal") or d:IsA("Texture") then d.Transparency = 1 end
-                end
-            end
-        end
-        task.wait(0.05)
-    end
-end)
-
 -- FONT MAPPING
 local function safeFont(name)
     local ok, f = pcall(function() return Enum.Font[name] end)
