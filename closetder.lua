@@ -129,7 +129,7 @@ local Config = {
     },
 }
 
-local ARMOR_MAX = 130
+local ARMOR_MAX = 200
 local function getArmorValue(char, player)
     local playersFolder = workspace:FindFirstChild("Players")
     if playersFolder then
@@ -908,7 +908,6 @@ RunService.RenderStepped:Connect(function()
     if not previewMain or not previewMain.Parent then return end
     previewMain.Visible = true
 
-    -- current preview box dims (matches centerHolder size)
     local cfg = ESPPreview.Images[ESPPreview.SelectedImage]
     local boxW = (cfg and cfg.Width)  or 95
     local boxH = (cfg and cfg.Height) or 155
@@ -2036,6 +2035,7 @@ end
 
 local function render(player)
     if not player then return end
+    if ESPCache[player] then return end
     ESPCache[player] = { Box = {}, Bars = {}, Text = {}, Gui = {} }
 
     ESPCache[player].Box.Full = {
@@ -2105,26 +2105,42 @@ local function clear_esp(player)
     local c = ESPCache[player]
     if not c then return end
     if c.Box and c.Box.Full then
-        c.Box.Full.Square.Visible  = false
-        c.Box.Full.Outline.Visible = false
-        c.Box.Full.Inline.Visible  = false
+        pcall(function() c.Box.Full.Square.Visible  = false end)
+        pcall(function() c.Box.Full.Outline.Visible = false end)
+        pcall(function() c.Box.Full.Inline.Visible  = false end)
     end
-    if c.Box and c.Box.Filled then c.Box.Filled.Visible = false end
+    if c.Box and c.Box.Filled then pcall(function() c.Box.Filled.Visible = false end) end
     if c.Text then
-        if c.Text.Name  then c.Text.Name.Visible  = false end
-        if c.Text.Studs then c.Text.Studs.Visible = false end
-        if c.Text.Tool  then c.Text.Tool.Visible  = false end
+        if c.Text.Name  then pcall(function() c.Text.Name.Visible  = false end) end
+        if c.Text.Studs then pcall(function() c.Text.Studs.Visible = false end) end
+        if c.Text.Tool  then pcall(function() c.Text.Tool.Visible  = false end) end
     end
     if c.Bars then
         if c.Bars.Health then
-            c.Bars.Health.Frame.Visible   = false
-            c.Bars.Health.Outline.Visible = false
+            pcall(function() c.Bars.Health.Frame.Visible   = false end)
+            pcall(function() c.Bars.Health.Outline.Visible = false end)
         end
         if c.Bars.Armor then
-            c.Bars.Armor.Frame.Visible   = false
-            c.Bars.Armor.Outline.Visible = false
+            pcall(function() c.Bars.Armor.Frame.Visible   = false end)
+            pcall(function() c.Bars.Armor.Outline.Visible = false end)
         end
     end
+end
+
+local function destroy_esp(player)
+    local c = ESPCache[player]
+    if not c then return end
+    if c.Box and c.Box.Full then
+        for _, dr in pairs(c.Box.Full) do
+            pcall(function() dr.Visible = false end)
+            pcall(function() dr:Remove() end)
+        end
+        c.Box.Full = nil
+    end
+    if c.Gui and c.Gui.Main then
+        pcall(function() c.Gui.Main:Destroy() end)
+    end
+    ESPCache[player] = nil
 end
 
 local function update(player)
@@ -2133,6 +2149,7 @@ local function update(player)
 
     if player == LocalPlayer and not Config.ShowOnSelf then return clear_esp(player) end
     if Whitelisted[player] then return clear_esp(player) end
+    if player.Parent == nil then return clear_esp(player) end
 
     local boxOn, textOn = Config.Box.Enable, Config.Text.Enable
     local hpOn,  arOn   = Config.Bars.Health.Enable, Config.Bars.Armor.Enable
@@ -2141,6 +2158,7 @@ local function update(player)
     local char  = player.Character
     local lchar = LocalPlayer.Character
     if not char or not lchar then return clear_esp(player) end
+    if not char.Parent then return clear_esp(player) end
 
     local hrp = char:FindFirstChild("HumanoidRootPart")
     local hum = char:FindFirstChildWhichIsA("Humanoid")
@@ -2394,15 +2412,25 @@ forceESPreFresh = function(plr)
     end
 end
 
-for _, p in ipairs(Players:GetPlayers()) do render(p) end
-Players.PlayerAdded:Connect(render)
+local function attachCharRemoving(plr)
+    if not plr then return end
+    plr.CharacterRemoving:Connect(function()
+        if ESPCache[plr] then clear_esp(plr) end
+    end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+    render(p)
+    attachCharRemoving(p)
+end
+
+Players.PlayerAdded:Connect(function(p)
+    render(p)
+    attachCharRemoving(p)
+end)
+
 Players.PlayerRemoving:Connect(function(p)
-    if ESPCache[p] then
-        if ESPCache[p].Gui and ESPCache[p].Gui.Main then
-            pcall(function() ESPCache[p].Gui.Main:Destroy() end)
-        end
-        ESPCache[p] = nil
-    end
+    destroy_esp(p)
 end)
 
 RunService.Heartbeat:Connect(function()
@@ -2410,7 +2438,13 @@ RunService.Heartbeat:Connect(function()
         for p in pairs(ESPCache) do clear_esp(p) end
         return
     end
-    for p in pairs(ESPCache) do update(p) end
+    for p in pairs(ESPCache) do
+        if p.Parent == nil then
+            destroy_esp(p)
+        else
+            update(p)
+        end
+    end
 end)
 
 -- ============================================================
@@ -2626,8 +2660,12 @@ end)
 -- AUTO ARMOR
 -- ============================================================
 local AutoArmor = {
-    Enabled=false, Delay=0.5, ClickWait=0.02, Cycles=12, ArmorMax=200,
-    TargetPos=CFrame.new(-938, -29, 566), ShopIndex=42,
+    Enabled = false,
+    ClickWait = 0.12,
+    Clicks = 3,
+    ArmorMax = 200,
+    TargetPos = CFrame.new(-938, -29, 566),
+    ShopIndex = 42,
 }
 local function getArmorShopClickDetector()
     local ignored = workspace:FindFirstChild("Ignored"); if not ignored then return nil end
@@ -2636,28 +2674,63 @@ local function getArmorShopClickDetector()
     local model = children[AutoArmor.ShopIndex]; if not model then return nil end
     return model:FindFirstChildWhichIsA("ClickDetector", true)
 end
+
 local function runAutoArmor()
-    local char = LocalPlayer.Character; if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart"); if not hrp then return end
-    local cd = getArmorShopClickDetector(); if not cd then return end
+    if not AutoArmor.Enabled then return end
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
     local armor = getArmorValueSelf()
     if armor and armor >= AutoArmor.ArmorMax then return end
+
+    local cd = getArmorShopClickDetector()
+    if not cd then return end
+
     local startCFrame = hrp.CFrame
-    for _ = 1, AutoArmor.Cycles do
-        if not AutoArmor.Enabled then break end
+
+    pcall(function()
         hrp.CFrame = AutoArmor.TargetPos
         hrp.AssemblyLinearVelocity  = Vector3.zero
         hrp.AssemblyAngularVelocity = Vector3.zero
+    end)
+
+    task.wait(0.15)
+
+    for i = 1, AutoArmor.Clicks do
+        if not AutoArmor.Enabled then break end
+
+        char = LocalPlayer.Character
+        if not char then break end
+        hrp = char:FindFirstChild("HumanoidRootPart")
+        if not hrp then break end
+
+        if not cd or not cd.Parent then
+            cd = getArmorShopClickDetector()
+            if not cd then break end
+        end
+
         pcall(function() fireclickdetector(cd) end)
         task.wait(AutoArmor.ClickWait)
-        RunService.Heartbeat:Wait()
     end
-    if hrp and hrp.Parent then
-        hrp.CFrame = startCFrame
-        hrp.AssemblyLinearVelocity  = Vector3.zero
-        hrp.AssemblyAngularVelocity = Vector3.zero
+
+    char = LocalPlayer.Character
+    if char then
+        local newHrp = char:FindFirstChild("HumanoidRootPart")
+        if newHrp then
+            pcall(function()
+                newHrp.CFrame = startCFrame
+                newHrp.AssemblyLinearVelocity  = Vector3.zero
+                newHrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
     end
 end
+
 local aaMasterOn = false
 MiscellaneousSection:Toggle({
     Name = "Auto Armor", Flag = "aa_enabled", Default = false,
@@ -2669,17 +2742,17 @@ MiscellaneousSection:Toggle({
         if type(v) == "boolean" then AutoArmor.Enabled = v end
     end,
 })
-MiscellaneousSection:Slider({ Name="Auto Armor Delay", Flag="aa_delay", Min=0, Max=5000, Default=500, Decimals=1, Suffix="ms", Callback=function(v) AutoArmor.Delay=v/1000 end })
+
 task.spawn(function()
     while true do
-        if not AutoArmor.Enabled then task.wait(0.1); continue end
-        runAutoArmor()
-        if AutoArmor.Delay > 0 then task.wait(AutoArmor.Delay) end
+        if not AutoArmor.Enabled then task.wait(0.2); continue end
+        pcall(runAutoArmor)
+        task.wait(1)
     end
 end)
 
 -- ============================================================
--- HEADLESS / KORBLOX
+-- HEADLESS / KORBLOX (Phantom Shell Method)
 -- ============================================================
 local Headless = { Enabled = false }
 local Korblox  = { Enabled = false }
@@ -2693,6 +2766,7 @@ local function applyHeadlessToCharacter(char)
         if d:IsA("Decal") or d:IsA("Texture") then d.Transparency = 1 end
     end
 end
+
 local function removeHeadlessFromCharacter(char)
     if not char then return end
     local head = char:FindFirstChild("Head"); if not head then return end
@@ -2702,76 +2776,139 @@ local function removeHeadlessFromCharacter(char)
         if d:IsA("Decal") or d:IsA("Texture") then d.Transparency = 0 end
     end
 end
+
 local function setHeadlessState(state)
     Headless.Enabled = state and true or false
     local char = LocalPlayer.Character
     if Headless.Enabled then applyHeadlessToCharacter(char) else removeHeadlessFromCharacter(char) end
 end
+
 LocalPlayer.CharacterAdded:Connect(function(char)
     if Headless.Enabled then task.wait(0.25); applyHeadlessToCharacter(char) end
 end)
 
-local korbloxConns = {}
-local function isKorbloxPart(part)
-    if not part or not part:IsA("BasePart") then return false end
-    local n = part.Name
-    return n == "Right Leg" or n == "RightUpperLeg" or n == "RightLowerLeg" or n == "RightFoot"
-end
-local function applyKorbloxPart(part)
-    if not part then return end
-    if part:GetAttribute("KorbloxSavedTransparency") == nil then
-        part:SetAttribute("KorbloxSavedTransparency", part.Transparency)
-    end
-    part.Transparency = 1
-    pcall(function() part.LocalTransparencyModifier = 1 end)
-end
-local function removeKorbloxPart(part)
-    if not part then return end
-    local saved = part:GetAttribute("KorbloxSavedTransparency")
-    if saved ~= nil then part.Transparency = saved end
-    pcall(function() part.LocalTransparencyModifier = 0 end)
-    part:SetAttribute("KorbloxSavedTransparency", nil)
-end
-local function clearKorbloxConns()
-    for _, c in ipairs(korbloxConns) do pcall(function() c:Disconnect() end) end
-    korbloxConns = {}
-end
-local function hookKorbloxChar(char)
+-- ---- PHANTOM LEG (Korblox) - FIXED ----
+local function applyKorbloxToCharacter(char)
     if not char then return end
-    for _, p in ipairs(char:GetChildren()) do
-        if isKorbloxPart(p) then
-            if Korblox.Enabled then applyKorbloxPart(p) end
-            table.insert(korbloxConns, p:GetPropertyChangedSignal("Transparency"):Connect(function()
-                if Korblox.Enabled and p.Transparency ~= 1 then p.Transparency = 1 end
-            end))
-            table.insert(korbloxConns, p:GetPropertyChangedSignal("LocalTransparencyModifier"):Connect(function()
-                if Korblox.Enabled and p.LocalTransparencyModifier ~= 1 then p.LocalTransparencyModifier = 1 end
-            end))
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    if hum.RigType == Enum.HumanoidRigType.R15 then
+        local limbs = {
+            {"RightLowerLeg", 902942093, true},
+            {"RightUpperLeg", 902942096, false, 902843398},
+            {"RightFoot",     902942089, true}
+        }
+
+        for _, info in ipairs(limbs) do
+            local p = char:FindFirstChild(info[1])
+            if p then
+                if not p:GetAttribute("OriginalMeshId") then
+                    p:SetAttribute("OriginalMeshId", p.MeshId)
+                    p:SetAttribute("OriginalTextureId", p.TextureID)
+                    p:SetAttribute("OriginalTransparency", p.Transparency)
+                end
+
+                p.MeshId = "http://www.roblox.com/asset/?id=" .. info[2]
+                if info[3] then p.Transparency = 1 end
+                if info[4] then
+                    p.TextureID = "http://roblox.com/asset/?id=" .. info[4]
+                end
+            end
         end
+    else
+        local base = char:FindFirstChild("Right Leg")
+        if not base then return end
+
+        if not base:GetAttribute("OriginalTransparency") then
+            base:SetAttribute("OriginalTransparency", base.Transparency)
+        end
+
+        base.Transparency = 1
+
+        local shell = char:FindFirstChild("PhantomShell")
+        if shell then shell:Destroy() end
+
+        shell = Instance.new("Part")
+        shell.Name = "PhantomShell"
+        shell.Size = Vector3.new(1, 2, 1)
+        shell.CanCollide = false
+        shell.Massless = true
+        shell.CFrame = base.CFrame * CFrame.new(0, 0.75, 0)
+        shell.Parent = char
+
+        local lock = Instance.new("WeldConstraint")
+        lock.Part0 = shell
+        lock.Part1 = base
+        lock.Parent = shell
+
+        local mesh = Instance.new("SpecialMesh")
+        mesh.MeshType = Enum.MeshType.FileMesh
+        mesh.MeshId = "http://www.roblox.com/asset/?id=902942093"
+        mesh.TextureId = "http://roblox.com/asset/?id=902843398"
+        mesh.Scale = Vector3.new(0.85, 1.25, 0.85)
+        mesh.Parent = shell
     end
 end
+
+local function removeKorbloxFromCharacter(char)
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    if hum.RigType == Enum.HumanoidRigType.R15 then
+        local limbs = {"RightLowerLeg", "RightUpperLeg", "RightFoot"}
+        for _, name in ipairs(limbs) do
+            local p = char:FindFirstChild(name)
+            if p then
+                local origMesh = p:GetAttribute("OriginalMeshId")
+                local origTex = p:GetAttribute("OriginalTextureId")
+                local origTrans = p:GetAttribute("OriginalTransparency")
+
+                if origMesh then p.MeshId = origMesh end
+                if origTex then p.TextureID = origTex end
+                if origTrans then p.Transparency = origTrans end
+
+                p:SetAttribute("OriginalMeshId", nil)
+                p:SetAttribute("OriginalTextureId", nil)
+                p:SetAttribute("OriginalTransparency", nil)
+            end
+        end
+    else
+        local base = char:FindFirstChild("Right Leg")
+        if base then
+            local origTrans = base:GetAttribute("OriginalTransparency")
+            if origTrans then base.Transparency = origTrans end
+            base:SetAttribute("OriginalTransparency", nil)
+        end
+
+        local shell = char:FindFirstChild("PhantomShell")
+        if shell then shell:Destroy() end
+    end
+end
+
 local function setKorbloxState(state)
     Korblox.Enabled = state and true or false
     local char = LocalPlayer.Character
-    clearKorbloxConns()
     if char then
-        for _, p in ipairs(char:GetChildren()) do
-            if isKorbloxPart(p) then
-                if Korblox.Enabled then applyKorbloxPart(p) else removeKorbloxPart(p) end
-            end
-        end
-        if Korblox.Enabled then hookKorbloxChar(char) end
+        if Korblox.Enabled then applyKorbloxToCharacter(char) else removeKorbloxFromCharacter(char) end
     end
 end
-LocalPlayer.CharacterAdded:Connect(function(char)
-    clearKorbloxConns()
-    task.wait(0.5)
-    if Korblox.Enabled then
-        for _, p in ipairs(char:GetChildren()) do
-            if isKorbloxPart(p) then applyKorbloxPart(p) end
+
+task.spawn(function()
+    while task.wait(0.1) do
+        if Korblox.Enabled then
+            local char = LocalPlayer.Character
+            if char then
+                pcall(applyKorbloxToCharacter, char)
+            end
         end
-        hookKorbloxChar(char)
     end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(0.5)
+    if Korblox.Enabled then applyKorbloxToCharacter(char) end
 end)
 
 MiscellaneousSection:Toggle({ Name="Headless", Flag="misc_headless", Default=false, Callback=function(state) setHeadlessState(state) end })
