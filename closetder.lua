@@ -66,6 +66,20 @@ local GunMacro = {
     Tools = {"[Double-Barrel SG]", "[TacticalShotgun]"},
     MaxRange = 49,
 }
+local KnifeJump = {
+    Enabled     = false,
+    KnifeName   = "Knife",   -- partial, case-insensitive
+    BoostJP     = 60,
+    Busy        = false,
+}
+local NoJumpCD = {
+    Enabled   = false,
+    ToolName  = "[Knife]",
+    JpDefault = 50,
+    JpKnife   = 60,
+    Conns     = {},
+    StepName  = "NoJumpCD_Force_" .. tostring(math.random(1, 1e9)),
+}
 local HostDetection = {
     Enabled = false,
     DelayMs = 50,
@@ -2750,6 +2764,159 @@ task.spawn(function()
         task.wait(1)
     end
 end)
+
+task.spawn(function()
+    while true do
+        if not AutoArmor.Enabled then task.wait(0.2); continue end
+        pcall(runAutoArmor)
+        task.wait(1)
+    end
+end)
+
+local function kj_findKnife()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and t.Name:lower():find(KnifeJump.KnifeName:lower(), 1, true) then
+                return t
+            end
+        end
+    end
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") and t.Name:lower():find(KnifeJump.KnifeName:lower(), 1, true) then
+            return t
+        end
+    end
+end
+
+local function kj_doJumpBoost()
+    if not KnifeJump.Enabled or KnifeJump.Busy then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    local knife = kj_findKnife()
+    if not knife then return end
+
+    local prev = char:FindFirstChildOfClass("Tool")
+    if prev == knife then return end
+
+    KnifeJump.Busy = true
+
+    -- 1. Force JumpPower INSTANTLY this frame so physics uses the boosted value
+    hum.JumpPower = KnifeJump.BoostJP
+
+    -- 2. Equip the knife visually so its script registers, but boost is already applied
+    if prev then prev.Parent = LocalPlayer.Backpack end
+    knife.Parent = char
+
+    -- 3. One frame later, revert knife & restore previous tool
+    task.spawn(function()
+        RunService.Heartbeat:Wait()
+        if knife.Parent == char then knife.Parent = LocalPlayer.Backpack end
+        if prev and prev.Parent == LocalPlayer.Backpack then prev.Parent = char end
+        KnifeJump.Busy = false
+    end)
+end
+
+-- Input listener (Space / Controller A)
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then
+        kj_doJumpBoost()
+    end
+end)
+
+-- Fallback for mobile / missed inputs
+local function kj_bindJumping(char)
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.Jumping:Connect(function()
+            if not KnifeJump.Busy then kj_doJumpBoost() end
+        end)
+    end
+end
+LocalPlayer.CharacterAdded:Connect(function(char)
+    local hum = char:WaitForChild("Humanoid", 5)
+    if hum then kj_bindJumping(char) end
+end)
+if LocalPlayer.Character then kj_bindJumping(LocalPlayer.Character) end
+
+-- UI Toggle
+MiscellaneousSection:Toggle({
+    Name = "Knife Jump", Flag = "misc_knifejump", Default = false,
+    Callback = function(state)
+        KnifeJump.Enabled = state and true or false
+        KnifeJump.Busy = false
+    end,
+})
+
+local function njcd_enforce()
+    if not NoJumpCD.Enabled then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+
+    if not hum.UseJumpPower then hum.UseJumpPower = true end
+
+    local holding = char:FindFirstChild(NoJumpCD.ToolName) ~= nil
+    local target  = holding and NoJumpCD.JpKnife or NoJumpCD.JpDefault
+    if hum.JumpPower ~= target then hum.JumpPower = target end
+end
+
+local function njcd_start()
+    if #NoJumpCD.Conns > 0 then return end
+
+    table.insert(NoJumpCD.Conns, RunService.RenderStepped:Connect(njcd_enforce))
+    table.insert(NoJumpCD.Conns, RunService.Stepped:Connect(njcd_enforce))
+    table.insert(NoJumpCD.Conns, RunService.Heartbeat:Connect(njcd_enforce))
+    pcall(function()
+        table.insert(NoJumpCD.Conns, RunService.PreSimulation:Connect(njcd_enforce))
+    end)
+    pcall(function()
+        table.insert(NoJumpCD.Conns, RunService.PostSimulation:Connect(njcd_enforce))
+    end)
+
+    -- Win property fights against game scripts
+    pcall(function()
+        RunService:BindToRenderStep(
+            NoJumpCD.StepName,
+            Enum.RenderPriority.Camera.Value + 1,
+            njcd_enforce
+        )
+    end)
+end
+
+local function njcd_stop()
+    pcall(function() RunService:UnbindFromRenderStep(NoJumpCD.StepName) end)
+    for _, c in ipairs(NoJumpCD.Conns) do
+        pcall(function() c:Disconnect() end)
+    end
+    NoJumpCD.Conns = {}
+
+    -- Restore default jump power when disabled
+    local char = LocalPlayer.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function()
+            if not hum.UseJumpPower then hum.UseJumpPower = true end
+            hum.JumpPower = NoJumpCD.JpDefault
+        end)
+    end
+end
+
+MiscellaneousSection:Toggle({
+    Name = "No Jump CD", Flag = "misc_nojumpcd", Default = false,
+    Callback = function(state)
+        NoJumpCD.Enabled = state and true or false
+        if NoJumpCD.Enabled then njcd_start() else njcd_stop() end
+    end,
+})
 
 -- ============================================================
 -- HEADLESS / KORBLOX (Phantom Shell Method)
