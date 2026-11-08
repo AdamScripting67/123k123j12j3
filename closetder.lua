@@ -188,6 +188,18 @@ local Config = {
         Tool   = { Enable = true,  Color = Color3.fromRGB(255,255,255) },
         Health = { Enable = false, Color = Color3.fromRGB(0, 255, 0) },
         Armor  = { Enable = false, Color = Color3.fromRGB(0, 150, 255) },
+        Flags  = { Enable = false },
+    },
+    -- Normalized offsets (fraction of box size) from default positions — set by ESP Preview drag
+    Layout = {
+        Name       = { X = 0, Y = 0 },
+        HealthText = { X = 0, Y = 0 },
+        ArmorText  = { X = 0, Y = 0 },
+        Flags      = { X = 0, Y = 0 },
+        Studs      = { X = 0, Y = 0 },
+        Tool       = { X = 0, Y = 0 },
+        HealthBar  = { X = 0, Y = 0 },
+        ArmorBar   = { X = 0, Y = 0 },
     },
     Bars = {
         Enable = true,
@@ -243,9 +255,10 @@ local function hasForceField(char)
     return false
 end
 
--- Spawn/respawn protection: ignore player for 0.50s after CharacterAdded
+-- Spawn/respawn protection: ignore player for 0.8s after CharacterAdded
+-- Used by Triggerbot / Gun Macro / HBE / Client Redirection (via isCombatImmune)
 local SpawnProtectUntil = {} -- [Player] = tick() expiry
-local SPAWN_PROTECT_SEC = 0.50
+local SPAWN_PROTECT_SEC = 0.8
 
 local function markSpawnProtect(plr)
     if not plr or plr == LocalPlayer then return end
@@ -263,10 +276,54 @@ local function isSpawnProtected(plr)
     return true
 end
 
+-- Read KO / Dead from a BodyEffects folder (workspace.Players or Character)
+local function bodyEffectsIsDown(be)
+    if not be then return false end
+    local ko = be:FindFirstChild("K.O") or be:FindFirstChild("KO")
+    if ko then
+        local kv = ko.Value
+        if type(kv) == "boolean" and kv then return true end
+        if type(kv) == "number" and kv > 0 then return true end
+        if type(kv) == "string" then
+            local s = kv:lower()
+            if s ~= "" and s ~= "false" and s ~= "0" then return true end
+        end
+        if kv == true then return true end
+    end
+    local dead = be:FindFirstChild("Dead")
+    if dead then
+        local dv = dead.Value
+        if dv == true then return true end
+        if type(dv) == "number" and dv > 0 then return true end
+    end
+    return false
+end
+
+-- True while player is knocked / fully dead (do not shoot until they get up or respawn)
+local function isPlayerKnockedOrDead(plr)
+    if not plr then return true end
+    local char = plr.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health <= 0 then return true end
+        if bodyEffectsIsDown(char:FindFirstChild("BodyEffects")) then return true end
+    end
+    local ok, down = pcall(function()
+        local playersFolder = workspace:FindFirstChild("Players")
+        if not playersFolder then return false end
+        local pFolder = playersFolder:FindFirstChild(plr.Name)
+        if not pFolder then return false end
+        return bodyEffectsIsDown(pFolder:FindFirstChild("BodyEffects"))
+    end)
+    if ok and down then return true end
+    return false
+end
+
 -- True if Gun Macro / Triggerbot must not shoot this player right now
 local function isCombatImmune(plr)
     if not plr then return true end
     if isSpawnProtected(plr) then return true end
+    if isPlayerKnockedOrDead(plr) then return true end
     local char = plr.Character
     if not char then return true end
     if hasForceField(char) then return true end
@@ -431,6 +488,11 @@ do
     raw = raw:gsub(
         "self:Tween%(%s*TweenInfo%.new%(0%.35, Enum%.EasingStyle%.Quart, Enum%.EasingDirection%.Out%),%s*{ Position = UDim2New%(0, NewX, 0, NewY%)%s*}%s*%)",
         "Gui.Position = UDim2New(0, NewX, 0, NewY)"
+    )
+    -- Block window drag while ESP preview elements are being dragged
+    raw = raw:gsub(
+        "if Dragging then%s*Set%(Input%)",
+        "if Dragging and not (getgenv and getgenv().ElytraPreviewDragging) then Set(Input)"
     )
     -- Faster default tweens (sliders / UI feel instant)
     raw = raw:gsub("Time = 0%.25,", "Time = 0.01,")
@@ -875,6 +937,7 @@ do
 
         for _, plr in ipairs(Players:GetPlayers()) do
             if plr == LocalPlayer or Whitelisted[plr] then continue end
+            if isCombatImmune(plr) then continue end
             local char = plr.Character
             if not char then continue end
             local hrp = char:FindFirstChild("HumanoidRootPart")
@@ -1634,7 +1697,7 @@ do
         local mousePos = UserInputService:GetMouseLocation()
 
         -- aiming near its expanded X/Y/Z volume (no sticky when looking away)
-        if currentTarget and not Whitelisted[currentTarget] then
+        if currentTarget and not Whitelisted[currentTarget] and not isCombatImmune(currentTarget) then
             local char = currentTarget.Character
             local hrp  = char and char:FindFirstChild("HumanoidRootPart")
             local hum  = char and char:FindFirstChildOfClass("Humanoid")
@@ -1652,7 +1715,7 @@ do
 
         local best, bestScore = nil, math.huge
         for _, plr in ipairs(Players:GetPlayers()) do
-            if plr ~= LocalPlayer and not Whitelisted[plr] then
+            if plr ~= LocalPlayer and not Whitelisted[plr] and not isCombatImmune(plr) then
                 local char = plr.Character
                 if char then
                     local hrp = char:FindFirstChild("HumanoidRootPart")
@@ -2319,16 +2382,6 @@ do
     })
 end
 
-ESPSection:Toggle({
-    Name = "Visual Self", Flag = "esp_self", Default = false,
-    Callback = function(v) Config.ShowOnSelf = v and true or false end,
-})
-
-ESPSection:Toggle({
-    Name = "Knock Check", Flag = "esp_knock_check", Default = false,
-    Callback = function(v) Config.KnockCheck = v and true or false end,
-})
-
 local boxToggle = ESPSection:Toggle({
     Name = "Box", Flag = "esp_box", Default = false,
     Callback = function(v) Config.Box.Enable = v and true or false end,
@@ -2399,14 +2452,6 @@ distToggle:Colorpicker({
     Flag = "esp_text_dist_color", Default = Config.Text.Studs.Color,
     Callback = function(c) Config.Text.Studs.Color = c end,
 })
-local toolToggle = ESPSection:Toggle({
-    Name = "Tool", Flag = "esp_text_tool", Default = false,
-    Callback = function(v) Config.Text.Tool.Enable = v and true or false end,
-})
-toolToggle:Colorpicker({
-    Flag = "esp_text_tool_color", Default = Config.Text.Tool.Color,
-    Callback = function(c) Config.Text.Tool.Color = c end,
-})
 
 local targetESPToggle = ESPSection:Toggle({
     Name = "Target", Flag = "esp_target", Default = false,
@@ -2417,13 +2462,38 @@ targetESPToggle:Colorpicker({
     Callback = function(c) TargetESP.Color = c end,
 })
 
--- Bottom of ESP tab: typed dropdowns
+local toolToggle = ESPSection:Toggle({
+    Name = "Tool", Flag = "esp_text_tool", Default = false,
+    Callback = function(v) Config.Text.Tool.Enable = v and true or false end,
+})
+toolToggle:Colorpicker({
+    Flag = "esp_text_tool_color", Default = Config.Text.Tool.Color,
+    Callback = function(c) Config.Text.Tool.Color = c end,
+})
+
+ESPSection:Toggle({
+    Name = "Flags", Flag = "esp_flags", Default = false,
+    Callback = function(v) Config.Text.Flags.Enable = v and true or false end,
+})
+
+ESPSection:Toggle({
+    Name = "Visual Self", Flag = "esp_self", Default = false,
+    Callback = function(v) Config.ShowOnSelf = v and true or false end,
+})
+
+ESPSection:Toggle({
+    Name = "Knock Check", Flag = "esp_knock_check", Default = false,
+    Callback = function(v) Config.KnockCheck = v and true or false end,
+})
+
+-- Box Type dropdown sits below Flags
 ESPSection:Dropdown({
     Name = "Box Type", Flag = "esp_box_style",
     Items = {"2D", "Corner", "3D"},
     Default = "2D",
     Callback = function(v) Config.BoxStyle = v or "2D" end,
 })
+
 ESPSection:Dropdown({
     Name = "Distance Unit", Flag = "esp_dist_unit",
     Items = {"Metres", "Studs"},
@@ -2637,21 +2707,21 @@ do
     end
 
     local lblName   = makePreviewLabel()
-    lblName.Size = UDim2.new(3, 0, 0, 14)
+    lblName.Size = UDim2.fromOffset(260, 14)
     lblName.AnchorPoint = Vector2.new(0.5, 1)
-    lblName.Position = UDim2.new(0.5, 0, 0, -5)
+    lblName.Position = UDim2.fromOffset(0, -4)
     lblName.TextXAlignment = Enum.TextXAlignment.Center
 
     local lblStuds  = makePreviewLabel()
-    lblStuds.Size = UDim2.new(2, 0, 0, 14)
+    lblStuds.Size = UDim2.fromOffset(120, 14)
     lblStuds.AnchorPoint = Vector2.new(0.5, 0)
-    lblStuds.Position = UDim2.new(0.5, 0, 1, 4)
+    lblStuds.Position = UDim2.fromOffset(0, 0)
     lblStuds.TextXAlignment = Enum.TextXAlignment.Center
 
     local lblTool   = makePreviewLabel()
-    lblTool.Size = UDim2.new(2, 0, 0, 14)
+    lblTool.Size = UDim2.fromOffset(160, 14)
     lblTool.AnchorPoint = Vector2.new(0.5, 0)
-    lblTool.Position = UDim2.new(0.5, 0, 1, 17)
+    lblTool.Position = UDim2.fromOffset(0, 0)
     lblTool.TextXAlignment = Enum.TextXAlignment.Center
 
     local lblArmor  = makePreviewLabel()
@@ -2667,14 +2737,16 @@ do
     lblHealth.Position = UDim2.fromOffset(-18, 16)
     lblHealth.TextXAlignment = Enum.TextXAlignment.Right
     lblHealth.TextSize = 10
+    -- positions refreshed each frame with Config.Layout offsets
 
     local function makePreviewBar(z)
         local outline = Instance.new("Frame", centerHolder)
-        outline.BackgroundColor3 = Color3.new(0,0,0)
+        outline.BackgroundColor3 = Color3.new(0, 0, 0)
         outline.BorderSizePixel = 0
         outline.ZIndex = z
         outline.Visible = false
         local fill = Instance.new("Frame", outline)
+        fill.BackgroundColor3 = Color3.new(1, 1, 1) -- required for UIGradient to show
         fill.BorderSizePixel = 0
         fill.Position = UDim2.fromOffset(1, 1)
         fill.Size = UDim2.new(1, -2, 1, -2)
@@ -2686,6 +2758,120 @@ do
 
     local hpOutline,  hpFill,  hpGrad  = makePreviewBar(35)
     local armOutline, armFill, armGrad = makePreviewBar(25)
+
+    -- Drag ESP elements in the preview → writes Config.Layout offsets used by live ESP.
+    -- Uses getgenv().ElytraPreviewDragging so the UI library skips window drag (patched above).
+    local _previewDrag = nil
+    local function ensureLayout(key)
+        if not Config.Layout then Config.Layout = {} end
+        if not Config.Layout[key] then Config.Layout[key] = { X = 0, Y = 0 } end
+        return Config.Layout[key]
+    end
+    -- Layout X/Y are fractions of the ESP box size. Convert to pixels for a given box.
+    local function layoutPixels(key, boxW, boxH)
+        local lay = Config.Layout and Config.Layout[key]
+        if not lay then return 0, 0 end
+        return (lay.X or 0) * boxW, (lay.Y or 0) * boxH
+    end
+    local function setPreviewDragging(v)
+        pcall(function()
+            if getgenv then getgenv().ElytraPreviewDragging = v and true or false end
+        end)
+    end
+    setPreviewDragging(false)
+
+    -- Base positions (without layout offset) used while dragging for live feedback
+    local previewBase = {
+        Name = function(off) return UDim2.new(0.5, off.X or 0, 0, -5 + (off.Y or 0)) end,
+        Studs = function(off) return UDim2.new(0.5, off.X or 0, 1, 4 + (off.Y or 0)) end,
+        Tool = function(off) return UDim2.new(0.5, off.X or 0, 1, 17 + (off.Y or 0)) end,
+    }
+    local function bindPreviewDrag(guiObj, layoutKey)
+        if not guiObj then return end
+        pcall(function()
+            guiObj.Active = true
+            guiObj.ZIndex = math.max(guiObj.ZIndex, 40)
+            -- No visible highlight — fully transparent hit target
+            if guiObj:IsA("TextLabel") or guiObj:IsA("TextButton") then
+                guiObj.BackgroundTransparency = 1
+            end
+        end)
+        trackConn(guiObj.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                and input.UserInputType ~= Enum.UserInputType.Touch then
+                return
+            end
+            local lay = ensureLayout(layoutKey)
+            setPreviewDragging(true)
+            _previewDrag = {
+                key = layoutKey,
+                obj = guiObj,
+                startMouse = Vector2.new(input.Position.X, input.Position.Y),
+                startX = lay.X or 0,
+                startY = lay.Y or 0,
+            }
+        end))
+    end
+    -- Same placement math as live ESP: box origin top-left (0,0), size (bw,bh)
+    local function applyOnePreviewPos(key, bw, bh)
+        local ox, oy = layoutPixels(key, bw, bh)
+        local barPos = Config.Bars.Health.Position or "Left"
+        local hpOn = Config.Enabled and Config.Bars.Health.Enable
+        local arOn = Config.Enabled and Config.Bars.Armor.Enable
+        local barColW = 0
+        if barPos == "Left" then
+            if arOn and hpOn then barColW = 16
+            elseif arOn or hpOn then barColW = 9 end
+        end
+        local leftEdge = -barColW - 4
+        local yCursor = bh + 4
+        if barPos == "Bottom" then
+            if arOn then yCursor = bh + 17 elseif hpOn then yCursor = bh + 10 end
+        end
+        if key == "Name" then
+            lblName.Position = UDim2.fromOffset(bw * 0.5 + ox, -4 + oy)
+        elseif key == "Studs" then
+            lblStuds.Position = UDim2.fromOffset(bw * 0.5 + ox, yCursor + oy)
+        elseif key == "Tool" then
+            if Config.Text.Studs.Enable then yCursor = yCursor + 14 end
+            lblTool.Position = UDim2.fromOffset(bw * 0.5 + ox, yCursor + oy)
+        elseif key == "ArmorText" then
+            lblArmor.Position = UDim2.fromOffset(leftEdge + ox, -1 + oy)
+        elseif key == "HealthText" then
+            local healthY = Config.Text.Armor.Enable and 1 or -1
+            lblHealth.Position = UDim2.fromOffset(leftEdge + ox, healthY + oy)
+        end
+    end
+    trackConn(UserInputService.InputChanged:Connect(function(input)
+        if not _previewDrag then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        local dx = input.Position.X - _previewDrag.startMouse.X
+        local dy = input.Position.Y - _previewDrag.startMouse.Y
+        -- Always normalize against logical box size (matches cfg Width/Height used by refresh)
+        local cfg = ESPPreview.Images[ESPPreview.SelectedImage]
+        local bw = math.max(1, (cfg and cfg.Width) or centerHolder.AbsoluteSize.X)
+        local bh = math.max(1, (cfg and cfg.Height) or centerHolder.AbsoluteSize.Y)
+        local lay = ensureLayout(_previewDrag.key)
+        lay.X = math.clamp(_previewDrag.startX + dx / bw, -1.5, 1.5)
+        lay.Y = math.clamp(_previewDrag.startY + dy / bh, -1.5, 1.5)
+        applyOnePreviewPos(_previewDrag.key, bw, bh)
+    end))
+    trackConn(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            _previewDrag = nil
+            setPreviewDragging(false)
+        end
+    end))
+    bindPreviewDrag(lblName, "Name")
+    bindPreviewDrag(lblStuds, "Studs")
+    bindPreviewDrag(lblTool, "Tool")
+    bindPreviewDrag(lblHealth, "HealthText")
+    bindPreviewDrag(lblArmor, "ArmorText")
+    -- Bars are not draggable (fixed to box sides)
 
     local function loadPreviewImage(url)
         if url == "LOCAL_PLAYER_AVATAR" then
@@ -2736,6 +2922,16 @@ do
         Callback = function(v)
             ESPPreview.SelectedImage = v
             applySelectedPreview()
+        end,
+    })
+
+    ESPPreviewSection:Button({
+        Name = "Reset ESP Layout",
+        Callback = function()
+            Config.Layout = {}
+            pcall(function()
+                if getgenv then getgenv().ElytraPreviewDragging = false end
+            end)
         end,
     })
 
@@ -2804,19 +3000,36 @@ do
             previewHead.Visible = false
         end
 
-        -- Keep preview text font/size in sync with ESP settings
+        -- Preview font style can follow setting; size stays fixed so preview doesn't scale with Text Size slider
         local previewFont = Config.Font or Enum.Font.GothamBold
-        local previewTS = math.max(1, Config.TextSize or 11)
+        local PREVIEW_TS = 11
         for _, lbl in ipairs({lblName, lblStuds, lblTool, lblArmor, lblHealth}) do
             if lbl then
                 lbl.Font = previewFont
-                lbl.TextSize = previewTS
+                lbl.TextSize = PREVIEW_TS
             end
         end
 
+        -- Exact same placement rules as live ESP (box = centerHolder 0,0 → bw,bh)
+        local barPos = Config.Bars.Health.Position or "Left"
+        local hpOnPrev = Config.Enabled and Config.Bars.Health.Enable
+        local arOnPrev = Config.Enabled and Config.Bars.Armor.Enable
+        local barColW = 0
+        if barPos == "Left" then
+            if arOnPrev and hpOnPrev then barColW = 16
+            elseif arOnPrev or hpOnPrev then barColW = 9 end
+        end
+        local leftEdge = -barColW - 4
+
         if Config.Enabled and Config.Text.Name.Enable then
+            local ox, oy = layoutPixels("Name", bw, bh)
             lblName.Visible = true
             lblName.TextColor3 = Config.Text.Name.Color
+            lblName.AnchorPoint = Vector2.new(0.5, 1)
+            lblName.TextXAlignment = Enum.TextXAlignment.Center
+            lblName.Size = UDim2.fromOffset(260, PREVIEW_TS + 3)
+            -- live: (centerX + ox, boxTop - 4 + oy)
+            lblName.Position = UDim2.fromOffset(bw * 0.5 + ox, -4 + oy)
             local sel = ESPPreview.SelectedImage
             local dn, un
             if sel == "Local Player" then
@@ -2834,56 +3047,98 @@ do
             lblName.Visible = false
         end
 
+        local yCursor = bh + 4
+        if barPos == "Bottom" then
+            if arOnPrev then yCursor = bh + 17 elseif hpOnPrev then yCursor = bh + 10 end
+        end
         if Config.Enabled and Config.Text.Studs.Enable then
+            local ox, oy = layoutPixels("Studs", bw, bh)
             lblStuds.Visible = true
             lblStuds.TextColor3 = Config.Text.Studs.Color
             lblStuds.Text = Config.DistanceUnit == "Studs" and "[54 studs]" or "[15m]"
+            lblStuds.AnchorPoint = Vector2.new(0.5, 0)
+            lblStuds.TextXAlignment = Enum.TextXAlignment.Center
+            lblStuds.Size = UDim2.fromOffset(120, PREVIEW_TS + 3)
+            -- live: (centerX + ox, yCursor + oy)
+            lblStuds.Position = UDim2.fromOffset(bw * 0.5 + ox, yCursor + oy)
+            yCursor = yCursor + 14
         else
             lblStuds.Visible = false
         end
         if Config.Enabled and Config.Text.Tool.Enable then
+            local ox, oy = layoutPixels("Tool", bw, bh)
             lblTool.Visible = true
             lblTool.TextColor3 = Config.Text.Tool.Color
             lblTool.Text = "[Revolver]"
+            lblTool.AnchorPoint = Vector2.new(0.5, 0)
+            lblTool.TextXAlignment = Enum.TextXAlignment.Center
+            lblTool.Size = UDim2.fromOffset(160, PREVIEW_TS + 3)
+            -- live: (centerX + ox, yCursor + oy)
+            lblTool.Position = UDim2.fromOffset(bw * 0.5 + ox, yCursor + oy)
         else
             lblTool.Visible = false
         end
 
-        if Config.Enabled and Config.Text.Health.Enable then
-            lblHealth.Visible = true
-            lblHealth.TextColor3 = Config.Text.Health.Color or Color3.fromRGB(80, 220, 100)
-            lblHealth.Text = "100 health"
-        else
-            lblHealth.Visible = false
-        end
         if Config.Enabled and Config.Text.Armor.Enable then
+            local ox, oy = layoutPixels("ArmorText", bw, bh)
             lblArmor.Visible = true
             lblArmor.TextColor3 = Config.Text.Armor.Color or Color3.fromRGB(30, 110, 255)
             lblArmor.Text = "100 armor"
+            lblArmor.AnchorPoint = Vector2.new(1, 1)
+            lblArmor.TextXAlignment = Enum.TextXAlignment.Right
+            lblArmor.Size = UDim2.fromOffset(120, PREVIEW_TS + 2)
+            -- live: (leftEdge + ox, boxTop - 1 + oy)
+            lblArmor.Position = UDim2.fromOffset(leftEdge + ox, -1 + oy)
         else
             lblArmor.Visible = false
         end
+        if Config.Enabled and Config.Text.Health.Enable then
+            local ox, oy = layoutPixels("HealthText", bw, bh)
+            lblHealth.Visible = true
+            lblHealth.TextColor3 = Config.Text.Health.Color or Color3.fromRGB(80, 220, 100)
+            lblHealth.Text = "100 health"
+            lblHealth.AnchorPoint = Vector2.new(1, 0)
+            lblHealth.TextXAlignment = Enum.TextXAlignment.Right
+            lblHealth.Size = UDim2.fromOffset(120, PREVIEW_TS + 2)
+            local healthY = Config.Text.Armor.Enable and 1 or -1
+            -- live: (leftEdge + ox, healthY + oy)
+            lblHealth.Position = UDim2.fromOffset(leftEdge + ox, healthY + oy)
+        else
+            lblHealth.Visible = false
+        end
 
-        local pos = Config.Bars.Health.Position or "Left"
+        local pos = barPos
         if Config.Enabled and Config.Bars.Health.Enable then
             hpOutline.Visible = true
-            hpGrad.Color = ColorSequence.new({
-                ColorSequenceKeypoint.new(0, Config.Bars.Health.Color1 or Color3.fromRGB(0,255,0)),
-                ColorSequenceKeypoint.new(0.5, Config.Bars.Health.Color2 or Color3.fromRGB(255,255,0)),
-                ColorSequenceKeypoint.new(1, Config.Bars.Health.Color3 or Color3.fromRGB(255,0,0)),
-            })
+            hpOutline.BackgroundColor3 = Color3.new(0, 0, 0)
+            hpOutline.BackgroundTransparency = 0
+            hpOutline.ZIndex = 40
+            hpFill.Visible = true
+            hpFill.ZIndex = 41
+            hpFill.BackgroundTransparency = 0
+            -- Match live ESP green health bar
+            hpFill.BackgroundColor3 = Color3.fromRGB(80, 220, 100)
+            pcall(function() hpGrad.Enabled = false end)
             if pos == "Left" then
-                hpOutline.Size = UDim2.fromOffset(4, bh); hpOutline.Position = UDim2.fromOffset(-7, 0)
-                lblHealth.Position = UDim2.fromOffset(-12, 14)
-                lblHealth.AnchorPoint = Vector2.new(1, 0)
+                hpOutline.Size = UDim2.fromOffset(5, bh)
+                hpOutline.Position = UDim2.fromOffset(-7, 0)
+                hpFill.Size = UDim2.new(1, -2, 0.85, -2)
+                hpFill.Position = UDim2.new(0, 1, 0.15, 1)
             elseif pos == "Right" then
-                hpOutline.Size = UDim2.fromOffset(4, bh); hpOutline.Position = UDim2.fromOffset(bw + 3, 0)
-                lblHealth.Position = UDim2.fromOffset(bw + 14, 14)
-                lblHealth.AnchorPoint = Vector2.new(0, 0)
+                hpOutline.Size = UDim2.fromOffset(5, bh)
+                hpOutline.Position = UDim2.fromOffset(bw + 3, 0)
+                hpFill.Size = UDim2.new(1, -2, 0.85, -2)
+                hpFill.Position = UDim2.new(0, 1, 0.15, 1)
             elseif pos == "Top" then
-                hpOutline.Size = UDim2.fromOffset(bw, 4); hpOutline.Position = UDim2.fromOffset(0, -7)
-            elseif pos == "Bottom" then
-                hpOutline.Size = UDim2.fromOffset(bw, 4); hpOutline.Position = UDim2.fromOffset(0, bh + 3)
+                hpOutline.Size = UDim2.fromOffset(bw, 5)
+                hpOutline.Position = UDim2.fromOffset(0, -7)
+                hpFill.Size = UDim2.new(0.85, -2, 1, -2)
+                hpFill.Position = UDim2.fromOffset(1, 1)
+            else
+                hpOutline.Size = UDim2.fromOffset(bw, 5)
+                hpOutline.Position = UDim2.fromOffset(0, bh + 3)
+                hpFill.Size = UDim2.new(0.85, -2, 1, -2)
+                hpFill.Position = UDim2.fromOffset(1, 1)
             end
         else
             hpOutline.Visible = false
@@ -2891,23 +3146,35 @@ do
 
         if Config.Enabled and Config.Bars.Armor.Enable then
             armOutline.Visible = true
-            armGrad.Color = ColorSequence.new({
-                ColorSequenceKeypoint.new(0,   Config.Bars.Armor.Color1),
-                ColorSequenceKeypoint.new(0.5, Config.Bars.Armor.Color2),
-                ColorSequenceKeypoint.new(1,   Config.Bars.Armor.Color3),
-            })
+            armOutline.BackgroundColor3 = Color3.new(0, 0, 0)
+            armOutline.BackgroundTransparency = 0
+            armOutline.ZIndex = 40
+            armFill.Visible = true
+            armFill.ZIndex = 41
+            armFill.BackgroundTransparency = 0
+            -- Match live ESP cyan/blue armor bar
+            armFill.BackgroundColor3 = Color3.fromRGB(50, 170, 255)
+            pcall(function() armGrad.Enabled = false end)
             if pos == "Left" then
-                armOutline.Size = UDim2.fromOffset(4, bh); armOutline.Position = UDim2.fromOffset(-13, 0)
-                lblArmor.Position = UDim2.fromOffset(-18, 0)
-                lblArmor.AnchorPoint = Vector2.new(1, 0)
+                armOutline.Size = UDim2.fromOffset(5, bh)
+                armOutline.Position = UDim2.fromOffset(-13, 0)
+                armFill.Size = UDim2.new(1, -2, 1, -2)
+                armFill.Position = UDim2.fromOffset(1, 1)
             elseif pos == "Right" then
-                armOutline.Size = UDim2.fromOffset(4, bh); armOutline.Position = UDim2.fromOffset(bw + 9, 0)
-                lblArmor.Position = UDim2.fromOffset(bw + 20, 0)
-                lblArmor.AnchorPoint = Vector2.new(0, 0)
+                armOutline.Size = UDim2.fromOffset(5, bh)
+                armOutline.Position = UDim2.fromOffset(bw + 9, 0)
+                armFill.Size = UDim2.new(1, -2, 1, -2)
+                armFill.Position = UDim2.fromOffset(1, 1)
             elseif pos == "Top" then
-                armOutline.Size = UDim2.fromOffset(bw, 4); armOutline.Position = UDim2.fromOffset(0, -13)
-            elseif pos == "Bottom" then
-                armOutline.Size = UDim2.fromOffset(bw, 4); armOutline.Position = UDim2.fromOffset(0, bh + 9)
+                armOutline.Size = UDim2.fromOffset(bw, 5)
+                armOutline.Position = UDim2.fromOffset(0, -13)
+                armFill.Size = UDim2.new(1, -2, 1, -2)
+                armFill.Position = UDim2.fromOffset(1, 1)
+            else
+                armOutline.Size = UDim2.fromOffset(bw, 5)
+                armOutline.Position = UDim2.fromOffset(0, bh + 9)
+                armFill.Size = UDim2.new(1, -2, 1, -2)
+                armFill.Position = UDim2.fromOffset(1, 1)
             end
         else
             armOutline.Visible = false
@@ -3487,14 +3754,30 @@ do
                (target == player.Character or target:IsDescendantOf(player.Character)) then
                 if Whitelisted[player] and not hostDetectEnabled then return false end
                 if isCombatImmune(player) then return false end
-                local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
-                if humanoid and humanoid.Health <= 0 then return false end
-                local effects = player.Character:FindFirstChild("BodyEffects")
-                if effects then
-                    local ko = effects:FindFirstChild("K.O") or effects:FindFirstChild("KO")
-                    if ko and ko.Value then return false end
-                end
                 return true
+            end
+        end
+        return false
+    end
+
+    local function isLocalCrouching()
+        -- Only Ctrl (common crouch bind). Do NOT treat C as crouch — it blocks shooting.
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+            or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then
+            return true
+        end
+        local char = LocalPlayer.Character
+        if not char then return false end
+        -- BodyEffects crouch/crawl flags (Da Hood style)
+        local be = char:FindFirstChild("BodyEffects")
+        if be then
+            for _, name in ipairs({"Crouch", "Crouching", "Crawl", "Crawling", "Sneak"}) do
+                local v = be:FindFirstChild(name)
+                if v then
+                    local val = v.Value
+                    if val == true then return true end
+                    if type(val) == "number" and val > 0 then return true end
+                end
             end
         end
         return false
@@ -3976,6 +4259,8 @@ do
 
             local character = LocalPlayer.Character
             if not character then continue end
+            -- Never shoot while local player is crouched / holding crouch
+            if isLocalCrouching() then continue end
             local tool = character:FindFirstChildWhichIsA("Tool")
             if not tool or isToolBlacklisted(tool) then continue end
 
@@ -4050,6 +4335,12 @@ do
             if useDelay > 0 then task.wait(useDelay) end
             if not Triggerbot.Enabled then continue end
             if hostDetectEnabled and not hd_sessionActive then continue end
+            if isLocalCrouching() then continue end
+            -- Re-validate target is still not knocked after delay
+            if targetChar then
+                local tp = Players:GetPlayerFromCharacter(targetChar)
+                if tp and isCombatImmune(tp) then continue end
+            end
 
             tool:Activate()
             if Triggerbot.Release > 0 then task.wait(Triggerbot.Release) end
@@ -4329,6 +4620,7 @@ local function InitESP()
         ESPCache[player].Text.Tool   = make_text(gui)
         ESPCache[player].Text.Health = make_text(gui)
         ESPCache[player].Text.Armor  = make_text(gui)
+        ESPCache[player].Text.Flags  = make_text(gui)
 
         local hOutline = Instance.new("Frame", gui)
         hOutline.Name = "HealthOutline"; hOutline.BackgroundColor3 = Color3.new(0,0,0)
@@ -4386,6 +4678,7 @@ local function InitESP()
             if c.Text.Tool then c.Text.Tool.Visible=false end
             if c.Text.Health then c.Text.Health.Visible=false end
             if c.Text.Armor then c.Text.Armor.Visible=false end
+            if c.Text.Flags then c.Text.Flags.Visible=false end
         end
         if c.Bars then
             if c.Bars.Health then
@@ -4446,23 +4739,45 @@ local function InitESP()
 
         local boxOn, skelOn, headOn = Config.Box.Enable, Config.Skeleton.Enable, Config.HeadCircle.Enable
         local hpOn, arOn = Config.Bars.Health.Enable, Config.Bars.Armor.Enable
+        local flagsOn = Config.Text.Flags and Config.Text.Flags.Enable
         local textOn = Config.Text.Name.Enable or Config.Text.Studs.Enable
             or Config.Text.Tool.Enable or Config.Text.Health.Enable or Config.Text.Armor.Enable
+            or flagsOn
         if not (boxOn or textOn or hpOn or arOn or skelOn or headOn) then return clear_esp(player) end
 
         local char, lchar = player.Character, LocalPlayer.Character
-        if not char or not lchar then return clear_esp(player) end
-        if not char.Parent then return clear_esp(player) end
+        if not lchar then return clear_esp(player) end
 
-        -- Part cache: refresh on character change or every ~0.2s (positions still read live each frame)
         local _now = os.clock()
-        if c.LastChar ~= char or not c.Parts or not c._partsAt or (_now - c._partsAt) > 0.2 then
+        -- Cache KO check ~8Hz (still reacts fast; cuts BodyEffects lookups)
+        local knockedNow = c._knockedCached
+        if not c._knockedAt or (_now - c._knockedAt) > 0.12 then
+            c._knockedAt = _now
+            knockedNow = false
+            pcall(function() knockedNow = esp_isKnocked(player) end)
+            c._knockedCached = knockedNow
+        end
+        if not char or not char.Parent then
+            return clear_esp(player)
+        end
+
+        -- Part cache: every frame while knocked so the box follows the crawling body
+        local refreshEvery = knockedNow and 0 or 0.25
+        if c.LastChar ~= char or not c.Parts or not c._partsAt or (_now - c._partsAt) > refreshEvery then
             c.LastChar = char
             c._partsAt = _now
             local p = c.Parts or {}
-            local function gp(n) return char:FindFirstChild(n) end
+            local function gp(n)
+                local v = char:FindFirstChild(n)
+                if v then return v end
+                -- Deep search only for critical roots when knocked models nest parts
+                if n == "HumanoidRootPart" or n == "Head" or n == "Torso" or n == "UpperTorso" then
+                    return char:FindFirstChild(n, true)
+                end
+                return nil
+            end
             p.HRP  = gp("HumanoidRootPart")
-            p.Hum  = char:FindFirstChildWhichIsA("Humanoid")
+            p.Hum  = char:FindFirstChildWhichIsA("Humanoid") or char:FindFirstChildWhichIsA("Humanoid", true)
             p.Head = gp("Head")
             p.UT   = gp("UpperTorso") or gp("Torso")
             p.LT   = gp("LowerTorso")
@@ -4483,33 +4798,47 @@ local function InitESP()
             p["Left Leg"] = gp("Left Leg"); p["Right Leg"] = gp("Right Leg")
             c.Parts = p
         end
-        local parts = c.Parts
-        local hrp, hum = parts.HRP, parts.Hum
-        if not hrp or not hum or not hrp.Parent then
-            c.Parts = nil; c.LastChar = nil
+        local parts = c.Parts or {}
+        c.Parts = parts
+        -- Real HRP only (using Head as root glitched box/skeleton)
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+            or char:FindFirstChild("UpperTorso")
+            or char:FindFirstChild("Torso")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hrp then
+            parts.HRP = hrp
+            parts["HumanoidRootPart"] = hrp
+        end
+        parts.Hum = hum
+        if not hrp or not hrp.Parent then
             return clear_esp(player)
         end
         local myRoot = lchar:FindFirstChild("HumanoidRootPart")
         if not myRoot then return clear_esp(player) end
         local worldDist = (hrp.Position - myRoot.Position).Magnitude
-        if Config.MaxDistance and Config.MaxDistance > 0 and worldDist > Config.MaxDistance then return clear_esp(player) end
+        -- Distance cull skipped while knocked so crawl never drops ESP
+        if not knockedNow and Config.MaxDistance and Config.MaxDistance > 0 and worldDist > Config.MaxDistance then
+            return clear_esp(player)
+        end
 
-        -- Knock check: hide ESP for knocked players if the toggle is on
-        -- Visuals still track position when players are knocked and moving (no early bail on knocked state alone)
-        if Config.KnockCheck and esp_isKnocked(player) then return clear_esp(player) end
+        if Config.KnockCheck and knockedNow then return clear_esp(player) end
+        c._lastGoodAt = _now
+        c._lastHrpPos = hrp.Position
 
         local _isTargetPlayer = TargetESP.Enabled and (
             (CurrentTarget and CurrentTarget == player) or
             (CR_State.ActiveTarget and CR_State.ActiveTarget == player)
         )
 
-        -- Fast pre-cull
+        -- Behind camera / invalid → hide (prevents ESP stuck on screen center)
         local hrpSP, hrpOnScreen = Camera:WorldToViewportPoint(hrp.Position)
-        if not hrpOnScreen and hrpSP.Z <= 0 then return clear_esp(player) end
+        if hrpSP.Z <= 0 then
+            return clear_esp(player)
+        end
 
         local posOffset = Vector3.zero  -- no smoothing offset; all visuals use raw positions
 
-        -- Bounds from cached parts (same visual quality, shifted by smoothed offset)
+        -- Bounds from body parts (parts refreshed every frame while knocked)
         local tlx, tly, brx, bry = math.huge, math.huge, -math.huge, -math.huge
         local found = false
         local keyParts = { parts.Head, parts.UT, parts.LT or hrp, parts.LUA, parts.RUA, parts.LF, parts.RF }
@@ -4538,7 +4867,16 @@ local function InitESP()
                 end
             end
         end
-        if not found or tlx == math.huge then return clear_esp(player) end
+        -- Knocked/ragdoll: fall back to root-centered box so ESP follows the body
+        if not found or tlx == math.huge then
+            local sp = Camera:WorldToViewportPoint(hrp.Position)
+            if sp.Z <= 0 then
+                return clear_esp(player)
+            end
+            local s = knockedNow and 34 or 28
+            tlx, tly, brx, bry = sp.X - s, sp.Y - s * 1.6, sp.X + s, sp.Y + s * 0.4
+            found = true
+        end
 
         local boxPos  = Vector2.new(math.floor(tlx - 2), math.floor(tly - 2))
         local boxSize = Vector2.new(math.floor(brx - tlx + 4), math.floor(bry - tly + 4))
@@ -4762,9 +5100,10 @@ local function InitESP()
         end
 
         if hpOn then
-            local rawHp = hum.Health
+            local rawHp = hum and hum.Health or 0
+            local maxHp = (hum and hum.MaxHealth) or 100
             local isGod = (rawHp > 200) or (rawHp ~= rawHp) or (rawHp == math.huge) or (rawHp == -math.huge)
-            local hp = isGod and 1 or math.clamp(rawHp / math.max(hum.MaxHealth, 1), 0, 1)
+            local hp = isGod and 1 or math.clamp(rawHp / math.max(maxHp, 1), 0, 1)
             local prev = c.Bars.Health.LastHealth or hp
             local smooth = prev + (hp - prev) * 0.05
             c.Bars.Health.LastHealth = smooth
@@ -4775,17 +5114,18 @@ local function InitESP()
             local barColor = isGod and Color3.fromRGB(255,40,40) or Color3.fromRGB(80,220,100)
             f.BackgroundColor3 = barColor
             if c.Bars.Health.Gradient then c.Bars.Health.Gradient.Color = isGod and _hpRedSeq or _hpGreenSeq end
+            local ox, oy = 0, 0 -- bars locked to box (not draggable)
             if pos == "Left" then
-                o.Position = UDim2.new(0, boxLeft - 7, 0, boxTop); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
+                o.Position = UDim2.new(0, boxLeft - 7 + ox, 0, boxTop + oy); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
                 f.Position = UDim2.new(0, 1, 0, (1 - smooth) * boxSize.Y + 1); f.Size = UDim2.new(0, 3, 0, smooth * boxSize.Y)
             elseif pos == "Right" then
-                o.Position = UDim2.new(0, boxRight + 3, 0, boxTop); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
+                o.Position = UDim2.new(0, boxRight + 3 + ox, 0, boxTop + oy); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
                 f.Position = UDim2.new(0, 1, 0, (1 - smooth) * boxSize.Y + 1); f.Size = UDim2.new(0, 3, 0, smooth * boxSize.Y)
             elseif pos == "Top" then
-                o.Position = UDim2.new(0, boxLeft - 1, 0, boxTop - 7); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
+                o.Position = UDim2.new(0, boxLeft - 1 + ox, 0, boxTop - 7 + oy); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
                 f.Position = UDim2.new(0, 1, 0, 1); f.Size = UDim2.new(0, smooth * boxSize.X, 0, 3)
             elseif pos == "Bottom" then
-                o.Position = UDim2.new(0, boxLeft - 1, 0, boxBot + 3); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
+                o.Position = UDim2.new(0, boxLeft - 1 + ox, 0, boxBot + 3 + oy); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
                 f.Position = UDim2.new(0, 1, 0, 1); f.Size = UDim2.new(0, smooth * boxSize.X, 0, 3)
             end
         else
@@ -4802,17 +5142,18 @@ local function InitESP()
             local pos = Config.Bars.Health.Position
             o.Visible = true; o.BackgroundTransparency = 0.2; o.ZIndex = 2
             f.Visible = true; f.ZIndex = 3
+            local ax, ay = 0, 0 -- bars locked to box (not draggable)
             if pos == "Left" then
-                o.Position = UDim2.new(0, boxLeft - 14, 0, boxTop); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
+                o.Position = UDim2.new(0, boxLeft - 14 + ax, 0, boxTop + ay); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
                 f.Position = UDim2.new(0, 1, 0, (1 - smooth) * boxSize.Y + 1); f.Size = UDim2.new(0, 3, 0, smooth * boxSize.Y)
             elseif pos == "Right" then
-                o.Position = UDim2.new(0, boxRight + 10, 0, boxTop); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
+                o.Position = UDim2.new(0, boxRight + 10 + ax, 0, boxTop + ay); o.Size = UDim2.new(0, 5, 0, boxSize.Y + 2)
                 f.Position = UDim2.new(0, 1, 0, (1 - smooth) * boxSize.Y + 1); f.Size = UDim2.new(0, 3, 0, smooth * boxSize.Y)
             elseif pos == "Top" then
-                o.Position = UDim2.new(0, boxLeft - 1, 0, boxTop - 14); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
+                o.Position = UDim2.new(0, boxLeft - 1 + ax, 0, boxTop - 14 + ay); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
                 f.Position = UDim2.new(0, 1, 0, 1); f.Size = UDim2.new(0, smooth * boxSize.X, 0, 3)
             elseif pos == "Bottom" then
-                o.Position = UDim2.new(0, boxLeft - 1, 0, boxBot + 10); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
+                o.Position = UDim2.new(0, boxLeft - 1 + ax, 0, boxBot + 10 + ay); o.Size = UDim2.new(0, boxSize.X + 2, 0, 5)
                 f.Position = UDim2.new(0, 1, 0, 1); f.Size = UDim2.new(0, smooth * boxSize.X, 0, 3)
             end
         else
@@ -4824,17 +5165,19 @@ local function InitESP()
             local barPos = Config.Bars.Health.Position
 
             if Config.Text.Name.Enable then
+                local ox = ((Config.Layout and Config.Layout.Name and Config.Layout.Name.X) or 0) * boxSize.X
+                local oy = ((Config.Layout and Config.Layout.Name and Config.Layout.Name.Y) or 0) * boxSize.Y
                 nL.Visible = true
                 nL.TextColor3 = (_isTargetPlayer and TargetESP.Color) or Config.Text.Name.Color
                 nL.TextXAlignment = Enum.TextXAlignment.Center
                 nL.AnchorPoint = Vector2.new(0.5, 1)
                 nL.TextSize = math.max(1, Config.TextSize)
-                nL.Size = UDim2.new(0, 260, 0, math.max(1, Config.TextSize) + 3)
+                nL.Size = UDim2.fromOffset(260, math.max(1, Config.TextSize) + 3)
                 local t = Config.Text.Name.Type
                 if t == "Display" then nL.Text = player.DisplayName
                 elseif t == "Username" then nL.Text = player.Name
                 else nL.Text = player.DisplayName.." (@"..player.Name..")" end
-                nL.Position = UDim2.new(0, centerX, 0, boxTop - 4)
+                nL.Position = UDim2.fromOffset(centerX + ox, boxTop - 4 + oy)
             else nL.Visible = false end
 
             local barColW = 0
@@ -4854,11 +5197,13 @@ local function InitESP()
                 aL.Font = Config.Font or Enum.Font.GothamBold
                 aL.TextSize = math.max(1, Config.TextSize or 11)
                 aL.Size = UDim2.new(0, 120, 0, math.max(1, Config.TextSize or 11) + 2)
-                aL.Position = UDim2.new(0, leftEdge, 0, boxTop - 1)
+                local ox = ((Config.Layout and Config.Layout.ArmorText and Config.Layout.ArmorText.X) or 0) * boxSize.X
+                local oy = ((Config.Layout and Config.Layout.ArmorText and Config.Layout.ArmorText.Y) or 0) * boxSize.Y
+                aL.Position = UDim2.fromOffset(leftEdge + ox, boxTop - 1 + oy)
             else aL.Visible = false end
 
             if Config.Text.Health.Enable then
-                local rawHp = hum.Health
+                local rawHp = hum and hum.Health or 0
                 local isGod = (rawHp > 200) or (rawHp ~= rawHp) or (rawHp == math.huge) or (rawHp == -math.huge)
                 hL.Visible = true
                 hL.TextXAlignment = Enum.TextXAlignment.Right
@@ -4874,8 +5219,82 @@ local function InitESP()
                     hL.TextColor3 = Config.Text.Health.Color
                 end
                 local healthY = Config.Text.Armor.Enable and (boxTop + 1) or (boxTop - 1)
-                hL.Position = UDim2.new(0, leftEdge, 0, healthY)
+                local ox = ((Config.Layout and Config.Layout.HealthText and Config.Layout.HealthText.X) or 0) * boxSize.X
+                local oy = ((Config.Layout and Config.Layout.HealthText and Config.Layout.HealthText.Y) or 0) * boxSize.Y
+                hL.Position = UDim2.fromOffset(leftEdge + ox, healthY + oy)
             else hL.Visible = false end
+
+            -- Flags (right side, opposite health/armor)
+            -- Dead = bright red | Reloading = yellow | Healing = green (only while HP is rising)
+            local fL = c.Text.Flags
+            if fL then
+                if flagsOn then
+                    local flagText, flagCol = nil, nil
+                    local be = nil
+                    pcall(function()
+                        local pf2 = workspace:FindFirstChild("Players")
+                        local pm = pf2 and pf2:FindFirstChild(player.Name)
+                        be = (pm and pm:FindFirstChild("BodyEffects")) or (char and char:FindFirstChild("BodyEffects"))
+                    end)
+                    local function beFlag(name)
+                        if not be then return false end
+                        local v = be:FindFirstChild(name)
+                        if not v then return false end
+                        local val = v.Value
+                        if val == true then return true end
+                        if type(val) == "number" and val > 0 then return true end
+                        if type(val) == "string" then
+                            local s = val:lower()
+                            return s ~= "" and s ~= "false" and s ~= "0"
+                        end
+                        return false
+                    end
+                    -- Healing only while holding a food tool (not guns / other tools)
+                    local holdingFood = false
+                    local tool = char and char:FindFirstChildOfClass("Tool")
+                    if tool then
+                        local tn = tool.Name:lower()
+                        if tn:find("donut", 1, true) or tn:find("pizza", 1, true)
+                            or tn:find("taco", 1, true) or tn:find("hamburger", 1, true)
+                            or tn:find("hotdog", 1, true) or tn:find("chicken", 1, true)
+                            or tn:find("popcorn", 1, true) or tn:find("latte", 1, true)
+                            or tn:find("cranberry", 1, true) or tn:find("cookie", 1, true)
+                            or tn:find("meat", 1, true) or tn:find("milk", 1, true) then
+                            holdingFood = true
+                        end
+                    end
+                    if knockedNow or (hum and hum.Health <= 0) or beFlag("K.O") or beFlag("KO") or beFlag("Dead") then
+                        flagText, flagCol = "Dead", Color3.fromRGB(255, 35, 35)
+                    elseif beFlag("Reload") or beFlag("Reloading") then
+                        flagText, flagCol = "Reloading", Color3.fromRGB(255, 220, 40)
+                    elseif holdingFood then
+                        flagText, flagCol = "Healing", Color3.fromRGB(70, 255, 110)
+                    end
+                    if flagText then
+                        local lay = (Config.Layout and Config.Layout.Flags) or {X=0,Y=0}
+                        fL.Visible = true
+                        fL.Text = flagText
+                        fL.TextColor3 = flagCol
+                        fL.TextXAlignment = Enum.TextXAlignment.Left
+                        fL.AnchorPoint = Vector2.new(0, 0)
+                        fL.Font = Config.Font or Enum.Font.GothamBold
+                        fL.TextSize = math.max(1, Config.TextSize or 11)
+                        fL.Size = UDim2.new(0, 120, 0, math.max(1, Config.TextSize or 11) + 2)
+                        local rightEdge = boxRight + 6
+                        if barPos == "Right" then
+                            if arOn and hpOn then rightEdge = boxRight + 18
+                            elseif arOn or hpOn then rightEdge = boxRight + 11 end
+                        end
+                        local ox = (lay.X or 0) * boxSize.X
+                        local oy = (lay.Y or 0) * boxSize.Y
+                        fL.Position = UDim2.fromOffset(rightEdge + ox, boxTop - 1 + oy)
+                    else
+                        fL.Visible = false
+                    end
+                else
+                    fL.Visible = false
+                end
+            end
 
             local yCursor = boxBot + 4
             if barPos == "Bottom" then
@@ -4894,11 +5313,14 @@ local function InitESP()
                 sL.TextSize = math.max(1, Config.TextSize)
                 sL.AnchorPoint = Vector2.new(0.5, 0)
                 sL.Size = UDim2.new(0, 120, 0, math.max(1, Config.TextSize) + 3)
-                sL.Position = UDim2.new(0, centerX, 0, yCursor)
+                local ox = ((Config.Layout and Config.Layout.Studs and Config.Layout.Studs.X) or 0) * boxSize.X
+                local oy = ((Config.Layout and Config.Layout.Studs and Config.Layout.Studs.Y) or 0) * boxSize.Y
+                sL.Position = UDim2.fromOffset(centerX + ox, yCursor + oy)
                 yCursor = yCursor + 14
             else sL.Visible = false end
 
             if Config.Text.Tool.Enable then
+                local layT = (Config.Layout and Config.Layout.Tool) or {X=0,Y=0}
                 tL.Visible = true
                 tL.TextColor3 = (_isTargetPlayer and TargetESP.Color) or Config.Text.Tool.Color
                 local tool = char:FindFirstChildOfClass("Tool")
@@ -4907,16 +5329,36 @@ local function InitESP()
                 tL.TextSize = math.max(1, Config.TextSize)
                 tL.AnchorPoint = Vector2.new(0.5, 0)
                 tL.Size = UDim2.new(0, 160, 0, math.max(1, Config.TextSize) + 3)
-                tL.Position = UDim2.new(0, centerX, 0, yCursor)
+                local ox = ((Config.Layout and Config.Layout.Tool and Config.Layout.Tool.X) or 0) * boxSize.X
+                local oy = ((Config.Layout and Config.Layout.Tool and Config.Layout.Tool.Y) or 0) * boxSize.Y
+                tL.Position = UDim2.fromOffset(centerX + ox, yCursor + oy)
             else tL.Visible = false end
         else
             c.Text.Name.Visible = false; c.Text.Studs.Visible = false; c.Text.Tool.Visible = false
             c.Text.Health.Visible = false; c.Text.Armor.Visible = false
+            if c.Text.Flags then c.Text.Flags.Visible = false end
         end
     end
 
-    for _, p in ipairs(Players:GetPlayers()) do render(p) end
-    trackConn(Players.PlayerAdded:Connect(render))
+    local function hookEspRespawn(plr)
+        if not plr or plr == LocalPlayer then return end
+        trackConn(plr.CharacterAdded:Connect(function()
+            -- Full redraw after respawn (knocked body is gone)
+            pcall(function() destroy_esp(plr) end)
+            task.defer(function()
+                if not Alive or not Config.Enabled then return end
+                if plr.Parent then pcall(render, plr) end
+            end)
+        end))
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        render(p)
+        hookEspRespawn(p)
+    end
+    trackConn(Players.PlayerAdded:Connect(function(p)
+        render(p)
+        hookEspRespawn(p)
+    end))
     trackConn(Players.PlayerRemoving:Connect(destroy_esp))
 
     local espWasEnabled = false
@@ -4926,7 +5368,7 @@ local function InitESP()
     local _espPlayers = {}
 
     -- Use RenderStepped for per-frame ESP so boxes never lag behind fast-moving players
-    trackConn(RunService.RenderStepped:Connect(function(dt)
+    trackConn(RunService.RenderStepped:Connect(function()
         if not Alive then return end
         if not Config.Enabled then
             if espWasEnabled then
@@ -4937,11 +5379,10 @@ local function InitESP()
         end
         espWasEnabled = true
         espFrame = espFrame + 1
-        local doGrad  = espFrame % 10 == 0  -- gradient update ~6Hz (unchanged from before)
-        local doClean = espFrame % 60 == 0  -- cleanup ~1Hz
+        local doGrad  = espFrame % 12 == 0
+        local doClean = espFrame % 90 == 0
         if doGrad then updateBarGradientsLocal() end
 
-        -- Snapshot keys first so cache mutations during update are safe
         local n = 0
         for p in pairs(ESPCache) do
             n = n + 1
@@ -4953,8 +5394,11 @@ local function InitESP()
             if p.Parent == nil then
                 if doClean then _toDestroy[#_toDestroy + 1] = p end
             else
+                -- update() is already pcall-safe internally for most paths
                 local ok = pcall(update, p)
-                if not ok then pcall(clear_esp, p) end
+                if not ok then
+                    pcall(clear_esp, p)
+                end
             end
         end
 
@@ -5721,27 +6165,35 @@ do
     -- ── Auto Door ──
     local AutoDoor = { Enabled = false, Range = 10 }
     local AD_PATHS = {
+        'workspace.MAP.Indestructible.Military:GetChildren()[26].Model.Door:GetChildren()[11].ClickDetector',
+        'workspace.MAP.Indestructible.Military:GetChildren()[4].Model.Door:GetChildren()[23].ClickDetector',
+        'workspace.MAP.Indestructible.MilitaryDestruction.Model.Model.Door:GetChildren()[12].ClickDetector',
+        'workspace.MAP.Indestructible.MilitaryDestruction:GetChildren()[3].Model.Door:GetChildren()[13].ClickDetector',
+        'workspace.MAP.Map.Apartment:GetChildren()[33].Door:GetChildren()[7].ClickDetector',
         'workspace.MAP.Map.Apartment.Door:GetChildren()[16].ClickDetector',
-        'workspace.MAP.Map.Apartment:GetChildren()[34].Door:GetChildren()[7].ClickDetector',
-        'workspace.MAP.Map.Apartment:GetChildren()[42].Door:GetChildren()[11].ClickDetector',
-        'workspace.MAP.Map.Apartment:GetChildren()[33].Door:GetChildren()[15].ClickDetector',
-        'workspace.MAP.Map.Apartment:GetChildren()[50].Door:GetChildren()[8].ClickDetector',
-        'workspace.MAP.Map["Game-Houses"]:GetChildren()[10].Perm.Door:GetChildren()[11].ClickDetector',
-        'workspace.MAP.Map["Game-Houses"]:GetChildren()[10].Perm:GetChildren()[6]:GetChildren()[28].ClickDetector',
-        'workspace.MAP.Map["Game-Houses"]:GetChildren()[12].Perm:GetChildren()[5].Part.ClickDetector',
-        'workspace.MAP.Map["Game-Houses"]:GetChildren()[11].Perm.Door:GetChildren()[17].ClickDetector',
+        'workspace.MAP.Map.Apartment:GetChildren()[41].Door:GetChildren()[11].ClickDetector',
+        'workspace.MAP.Map.Apartment:GetChildren()[49].Door:GetChildren()[8].ClickDetector',
+        'workspace.MAP.Map.Apartment:GetChildren()[32].Door:GetChildren()[15].ClickDetector',
+        'workspace.MAP.Indestructible:GetChildren()[3]:GetChildren()[2]:GetChildren()[20]:GetChildren()[19].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[10].Perm.Door:GetChildren()[22].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[11].Perm:GetChildren()[6]:GetChildren()[20].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[12].Perm.Door.Part.ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[10].Perm:GetChildren()[6]:GetChildren()[15].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[12].Perm:GetChildren()[6]:GetChildren()[7].ClickDetector',
         'workspace.MAP.Map["Ubi\'s Resturant"].Door:GetChildren()[20].ClickDetector',
         'workspace.MAP.Map.WarehouseExpansion.Door:GetChildren()[24].ClickDetector',
-        'workspace.MAP.Map["Game-Houses"]:GetChildren()[6].Perm:GetChildren()[4]:GetChildren()[20].ClickDetector',
-        'workspace.MAP.Map["Game-Houses"].Apartment.Perm:GetChildren()[4]:GetChildren()[12].ClickDetector',
-        'workspace.MAP.Map.AbandonedBuilding_Addition.Abandoned_House.Door:GetChildren()[28].ClickDetector',
-        'workspace.MAP.Map["Game-Houses"]:GetChildren()[15].Perm:GetChildren()[5]:GetChildren()[19].ClickDetector',
-        'workspace.MAP.Map["Game-Houses"]:GetChildren()[14].Perm.Door:GetChildren()[20].ClickDetector',
-        'workspace.MAP.Indestructible.Military:GetChildren()[4].Model.Door:GetChildren()[23].ClickDetector',
-        'workspace.MAP.Indestructible.Military:GetChildren()[26].Model.Door.Part.ClickDetector',
-        'workspace.MAP.Indestructible.MilitaryDestruction:GetChildren()[3].Model.Door:GetChildren()[13].ClickDetector',
-        'workspace.MAP.Indestructible.MilitaryDestruction.Model.Model.Door.Part.ClickDetector',
-        'workspace.MAP.Indestructible.Military:GetChildren()[26].Model.Door.Part.ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[4].Perm:GetChildren()[6]:GetChildren()[10].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[4].Perm.Door:GetChildren()[7].ClickDetector',
+        'workspace.MAP.Map.AbandonedBuilding_Addition.Abandoned_House:GetChildren()[8].Part.ClickDetector',
+        'workspace.MAP.Map.AbandonedBuilding_Addition.Abandoned_House.Door:GetChildren()[27].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"].Apartment.Perm.Door:GetChildren()[21].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"].Apartment.Perm:GetChildren()[6]:GetChildren()[14].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[15].Perm.Door:GetChildren()[9].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[15].Perm:GetChildren()[6]:GetChildren()[7].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[14].Perm.Door:GetChildren()[19].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[14].Perm:GetChildren()[6]:GetChildren()[21].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[6].Perm.Door:GetChildren()[13].ClickDetector',
+        'workspace.MAP.Map["Game-Houses"]:GetChildren()[6].Perm:GetChildren()[6]:GetChildren()[26].ClickDetector',
     }
 
     local function ad_resolve(expr)
@@ -5810,14 +6262,49 @@ do
         end
     end)
 
+    -- Only real Lock instances (NOT "Block" / parts that merely contain "lock")
+    local function ad_isLock(cd)
+        local p = cd and cd.Parent
+        local depth = 0
+        while p and depth < 6 do
+            local n = tostring(p.Name or "")
+            if n == "Lock" or n == "lock" or n == "LOCKED" then
+                return true
+            end
+            p = p.Parent
+            depth = depth + 1
+        end
+        return false
+    end
+
     local function ad_fire(cd)
+        if not cd or not cd.Parent then return end
+        if ad_isLock(cd) then return end
+        pcall(function() cd.MaxActivationDistance = 64 end)
         pcall(function()
-            if fireclickdetector then fireclickdetector(cd)
-            elseif firesignal then firesignal(cd.MouseClick) end
+            if fireclickdetector then
+                fireclickdetector(cd)
+                fireclickdetector(cd, 0)
+                fireclickdetector(cd, 10)
+            end
+        end)
+        pcall(function()
+            if firesignal then firesignal(cd.MouseClick) end
+        end)
+        pcall(function()
+            if getconnections then
+                for _, conn in ipairs(getconnections(cd.MouseClick)) do
+                    pcall(function()
+                        if conn.Fire then conn:Fire()
+                        elseif conn.Function then conn.Function()
+                        end
+                    end)
+                end
+            end
         end)
     end
 
-    -- Part attached to the ClickDetector (doors use this for CanCollide open/closed)
+    -- Part attached to the ClickDetector (used for position)
     local function ad_part(cd)
         if not cd then return nil end
         local parent = cd.Parent
@@ -5837,13 +6324,36 @@ do
         return nil
     end
 
-    -- Only spam when the door part is collidable (closed). Skip if CanCollide is off.
-    local function ad_canSpam(cd)
-        local part = ad_part(cd)
-        if not part then return false end
-        return part.CanCollide == true
+    -- Closed = any related door part still has CanCollide on. Open = all off → don't fire.
+    local function ad_isClosed(cd)
+        if not cd then return false end
+        local parent = cd.Parent
+        if not parent then return false end
+
+        local function hasCollide(inst, depth)
+            if not inst or depth > 5 then return false end
+            if inst:IsA("BasePart") and inst.CanCollide == true then
+                return true
+            end
+            for _, ch in ipairs(inst:GetChildren()) do
+                if hasCollide(ch, depth + 1) then return true end
+            end
+            return false
+        end
+
+        if hasCollide(parent, 0) then return true end
+        -- Door model is often one level up from the ClickDetector parent
+        if parent.Parent and hasCollide(parent.Parent, 0) then return true end
+        if parent.Parent and parent.Parent.Parent and parent.Parent.Name:lower():find("door", 1, true) then
+            if hasCollide(parent.Parent.Parent, 0) then return true end
+        end
+        return false
     end
 
+    -- Fire every nearby closed door (not locks). Fast scan + fire.
+    local ad_lastScan = 0
+    local AD_FIRE_INTERVAL = 0.05
+    local ad_fireAt = {} -- [cd] = last fire clock
     trackConn(RunService.Heartbeat:Connect(function()
         if not Alive or not AutoDoor.Enabled then return end
         local char = LocalPlayer.Character
@@ -5851,14 +6361,39 @@ do
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not hrp or (hum and hum.Health <= 0) then return end
         local myPos = hrp.Position
+        local range = AutoDoor.Range or 10
+        local now = os.clock()
+
+        if #ad_tracked == 0 or (now - ad_lastScan) > 1.5 then
+            ad_lastScan = now
+            pcall(ad_rebuild)
+            pcall(function()
+                local map = workspace:FindFirstChild("MAP")
+                if not map then return end
+                for _, inst in ipairs(map:GetDescendants()) do
+                    if inst:IsA("ClickDetector") and not ad_seen[inst] then
+                        if not ad_isLock(inst) then
+                            ad_seen[inst] = true
+                            table.insert(ad_tracked, {cd = inst})
+                        end
+                    end
+                end
+            end)
+        end
+
         for _, entry in ipairs(ad_tracked) do
             local cd = entry.cd
-            if cd and cd.Parent then
-                -- Do not spam if the door part has CanCollide off
-                if not ad_canSpam(cd) then continue end
-                local pos = ad_pos(cd)
-                if pos and (myPos - pos).Magnitude <= AutoDoor.Range then
-                    ad_fire(cd)
+            if cd and cd.Parent and not ad_isLock(cd) then
+                local last = ad_fireAt[cd] or 0
+                if (now - last) >= AD_FIRE_INTERVAL then
+                    local pos = ad_pos(cd)
+                    if pos and (myPos - pos).Magnitude <= range then
+                        -- Only closed doors (CanCollide still on)
+                        if ad_isClosed(cd) then
+                            ad_fireAt[cd] = now
+                            ad_fire(cd)
+                        end
+                    end
                 end
             end
         end
@@ -5889,11 +6424,12 @@ do
     local hb_tracked = {}
 
     -- Hard ignore list (paths / names that must never be clicked)
-    local HB_IGNORE_INDEX = { [51]=true, [32]=true, [35]=true }
+    local HB_IGNORE_INDEX = { [32]=true, [51]=true }
     local HB_IGNORE_NAME = {
+        ["[Silencer] - $400"] = true,
+        ["[Flintlock] - $3000"] = true,
         ["[LockPicker] - $106"] = true,
         ["[PepperSpray] - $159"] = true,
-        ["[Silencer] - $400"] = true,
     }
 
     local FOOD_NAMES = {
@@ -6114,6 +6650,62 @@ do
             end
         end,
     })
+
+    -- Anti AFK: press W every 15 minutes to avoid idle kick
+    do
+        local AntiAFK = { Enabled = false }
+        local function afkPressW()
+            pcall(function()
+                if VIM then
+                    VIM:SendKeyEvent(true, Enum.KeyCode.W, false, game)
+                    task.wait(0.08)
+                    VIM:SendKeyEvent(false, Enum.KeyCode.W, false, game)
+                elseif keypress and keyrelease then
+                    keypress(Enum.KeyCode.W)
+                    task.wait(0.08)
+                    keyrelease(Enum.KeyCode.W)
+                end
+            end)
+        end
+        task.spawn(function()
+            while Alive do
+                for _ = 1, 900 do
+                    if not Alive then return end
+                    task.wait(1)
+                    if not AntiAFK.Enabled then break end
+                end
+                if not Alive then return end
+                if AntiAFK.Enabled then
+                    afkPressW()
+                end
+            end
+        end)
+        MiscellaneousSection:Toggle({
+            Name = "Anti AFK", Flag = "util_antiafk", Default = false,
+            Callback = function(state)
+                AntiAFK.Enabled = state and true or false
+            end,
+        })
+    end
+
+    -- Chat Spy: toggle TextChatService chat window
+    do
+        local function setChatSpy(state)
+            pcall(function()
+                local TextChatService = game:GetService("TextChatService")
+                local cfg = TextChatService.ChatWindowConfiguration
+                if cfg then
+                    cfg.Enabled = state and true or false
+                end
+            end)
+        end
+        MiscellaneousSection:Toggle({
+            Name = "Chat Spy", Flag = "util_chatspy", Default = false,
+            Callback = function(state)
+                setChatSpy(state and true or false)
+            end,
+        })
+    end
 
 -- ============================================================
 -- AUTO EAT & AUTO ARMOR
