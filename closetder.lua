@@ -3761,33 +3761,70 @@ do
     end))
 
     -- ─────────────────────────────────────────────────────────────
-    -- BLACKLIST CACHE ENFORCER (safety net)
-    -- Every second, force any cached-blacklisted player back to
-    -- un-whitelisted. Guarantees cache wins even if some other code
-    -- path auto-whitelisted them.
+    -- BLACKLIST CACHE ENFORCER (optimized)
+    -- Old version polled every 1s, allocated a snapshot table each
+    -- tick, and could fire forceESPreFresh() (a full ESP re-render)
+    -- once per second for every blacklisted rejoiner — that was the
+    -- lag spike. This version is event-driven with a slow safety
+    -- sweep that early-exits when the cache is empty.
     -- ─────────────────────────────────────────────────────────────
-    task.spawn(function()
-        while Alive do
-            task.wait(1)
-            if not Alive then break end
-            local snapshot = {}
-            for plr, ui in pairs(PlayerRows) do
-                snapshot[#snapshot + 1] = { plr = plr, ui = ui }
+    do
+        local enforcedAt       = {}
+        local ENFORCE_COOLDOWN = 5  -- seconds between enforcements per player
+
+        local function enforcePlayer(plr)
+            if not plr or not plr.Parent then return end
+            if not Whitelisted[plr] then return end
+            if not blCacheIsBlacklisted(plr.Name) then return end
+
+            local now  = tick()
+            local last = enforcedAt[plr]
+            if last and (now - last) < ENFORCE_COOLDOWN then return end
+            enforcedAt[plr] = now
+
+            local ui = PlayerRows[plr]
+            Whitelisted[plr] = nil
+            if ui and ui.chip then
+                pcall(styleChip, ui.chip, ui.nameLabel, ui.track, ui.knob, false, false)
             end
-            for _, entry in ipairs(snapshot) do
-                local plr, ui = entry.plr, entry.ui
-                if plr and plr.Parent
-                   and blCacheIsBlacklisted(plr.Name)
-                   and Whitelisted[plr] then
-                    Whitelisted[plr] = nil
-                    if ui and ui.chip then
-                        pcall(styleChip, ui.chip, ui.nameLabel, ui.track, ui.knob, false, false)
-                    end
-                    if forceESPreFresh then pcall(forceESPreFresh, plr) end
+            if forceESPreFresh then pcall(forceESPreFresh, plr) end
+        end
+
+        -- Free per-player bookkeeping the moment they leave
+        trackConn(Players.PlayerRemoving:Connect(function(plr)
+            enforcedAt[plr] = nil
+        end))
+
+        -- One-shot check shortly after each join (catches the
+        -- createPlayerRow auto-whitelist init race)
+        local function scheduleJoinCheck(plr)
+            task.delay(1.5, function()
+                if Alive then enforcePlayer(plr) end
+            end)
+        end
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then scheduleJoinCheck(plr) end
+        end
+        trackConn(Players.PlayerAdded:Connect(function(plr)
+            if plr ~= LocalPlayer then scheduleJoinCheck(plr) end
+        end))
+
+        -- Low-frequency safety net. Bails out immediately when the
+        -- blacklist cache is empty, so it costs ~zero on servers
+        -- where no one has been blacklisted.
+        task.spawn(function()
+            while Alive do
+                task.wait(30)
+                if not Alive then break end
+                local any = false
+                for _ in pairs(BlacklistCache) do any = true; break end
+                if not any then continue end
+                for plr in pairs(PlayerRows) do
+                    enforcePlayer(plr)
                 end
             end
-        end
-    end)
+        end)
+    end
 end
 
 -- ============================================================
