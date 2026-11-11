@@ -2360,6 +2360,9 @@ do
     local function applyESP(v)
         if type(v) ~= "boolean" then return end
         Config.Enabled = v
+        if v and forceESPreFresh then
+            task.defer(function() pcall(forceESPreFresh) end)
+        end
     end
 
     espToggle = ESPSection:Toggle({
@@ -3283,6 +3286,33 @@ do
     local searchQuery = ""
     local autoWhitelistEnabled = true
 
+    -- Persistent blacklist cache: name -> expiry tick (default 1 hour).
+    -- When the user blacklists a player we remember it for ~1h so that if they
+    -- leave and rejoin in that window they do NOT get auto-whitelisted again.
+    local BlacklistCache = {}
+    local BLACKLIST_CACHE_SEC = 3600
+
+    local function blCacheSet(name)
+        if type(name) ~= "string" or name == "" then return end
+        BlacklistCache[name] = tick() + BLACKLIST_CACHE_SEC
+    end
+
+    local function blCacheClear(name)
+        if type(name) ~= "string" then return end
+        BlacklistCache[name] = nil
+    end
+
+    local function blCacheIsBlacklisted(name)
+        if type(name) ~= "string" then return false end
+        local expiry = BlacklistCache[name]
+        if not expiry then return false end
+        if tick() >= expiry then
+            BlacklistCache[name] = nil
+            return false
+        end
+        return true
+    end
+
     local THEME = {
         Inline       = Color3.fromRGB(18, 18, 20),
         Element      = Color3.fromRGB(28, 28, 32),
@@ -3446,6 +3476,8 @@ do
                 if not Whitelisted[plr] then Whitelisted[plr] = true; c = c + 1 end
                 if ui and ui.chip then styleChip(ui.chip, ui.nameLabel, ui.track, ui.knob, true, false) end
             end
+            -- Whitelisting everyone also forgets any cached blacklists
+            BlacklistCache = {}
             if forceESPreFresh then forceESPreFresh() end
             Library:Notification("Whitelisted " .. c, 2)
         end)
@@ -3453,6 +3485,7 @@ do
             local c = 0
             for plr, ui in pairs(PlayerRows) do
                 if Whitelisted[plr] then Whitelisted[plr] = nil; c = c + 1 end
+                blCacheSet(plr.Name)   -- remember them as blacklisted across rejoins
                 if ui and ui.chip then styleChip(ui.chip, ui.nameLabel, ui.track, ui.knob, false, false) end
             end
             if forceESPreFresh then forceESPreFresh() end
@@ -3578,7 +3611,11 @@ do
         if not Alive then return end
         if plr == LocalPlayer then return end
         if PlayerRows[plr] then return end
-        if autoWhitelistEnabled then Whitelisted[plr] = true end
+        -- Respect the persistent blacklist cache: if this player was blacklisted
+        -- within the last hour, do NOT auto-whitelist them on (re)join.
+        if autoWhitelistEnabled and not blCacheIsBlacklisted(plr.Name) then
+            Whitelisted[plr] = true
+        end
 
         local row = Instance.new("Frame")
         row.Name = plr.Name .. "_Row"
@@ -3641,8 +3678,10 @@ do
         chip.MouseButton1Click:Connect(function()
             if Whitelisted[plr] then
                 Whitelisted[plr] = nil
+                blCacheSet(plr.Name)   -- remember blacklist across rejoins for ~1h
             else
                 Whitelisted[plr] = true
+                blCacheClear(plr.Name) -- user re-whitelisted → forget the cached blacklist
                 -- Drop any active combat locks on newly-whitelisted players
                 if CurrentTarget == plr then CurrentTarget = nil end
                 if CR_State and CR_State.ActiveTarget == plr then pcall(function() if cr_restore then cr_restore() end end) end
@@ -3700,15 +3739,14 @@ do
 
     trackConn(Players.PlayerAdded:Connect(function(plr)
         if plr ~= LocalPlayer then
-            if autoWhitelistEnabled then Whitelisted[plr] = true end
+            -- createPlayerRow handles auto-whitelist + persistent blacklist cache
             createPlayerRow(plr)
         end
     end))
     trackConn(Players.PlayerRemoving:Connect(removePlayerRow))
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
-            if autoWhitelistEnabled then Whitelisted[plr] = true end
-            createPlayerRow(plr)
+            createPlayerRow(plr)  -- handles auto-whitelist + persistent blacklist cache
         end
     end
 
@@ -3721,6 +3759,35 @@ do
         Camera.CameraType    = Enum.CameraType.Custom
         Camera.CameraSubject = hum
     end))
+
+    -- ─────────────────────────────────────────────────────────────
+    -- BLACKLIST CACHE ENFORCER (safety net)
+    -- Every second, force any cached-blacklisted player back to
+    -- un-whitelisted. Guarantees cache wins even if some other code
+    -- path auto-whitelisted them.
+    -- ─────────────────────────────────────────────────────────────
+    task.spawn(function()
+        while Alive do
+            task.wait(1)
+            if not Alive then break end
+            local snapshot = {}
+            for plr, ui in pairs(PlayerRows) do
+                snapshot[#snapshot + 1] = { plr = plr, ui = ui }
+            end
+            for _, entry in ipairs(snapshot) do
+                local plr, ui = entry.plr, entry.ui
+                if plr and plr.Parent
+                   and blCacheIsBlacklisted(plr.Name)
+                   and Whitelisted[plr] then
+                    Whitelisted[plr] = nil
+                    if ui and ui.chip then
+                        pcall(styleChip, ui.chip, ui.nameLabel, ui.track, ui.knob, false, false)
+                    end
+                    if forceESPreFresh then pcall(forceESPreFresh, plr) end
+                end
+            end
+        end
+    end)
 end
 
 -- ============================================================
@@ -4731,6 +4798,15 @@ local function InitESP()
 
     local function update(player)
         local c = ESPCache[player]; if not c then return end
+        -- Self-heal: if the ScreenGui was destroyed externally (anti-cheat, CoreGui
+        -- cleanup), the cached UI objects are dead — rebuild it.
+        if not c.Gui or not c.Gui.Main or not c.Gui.Main.Parent then
+            pcall(function() destroy_esp(player) end)
+            if Config.Enabled and player.Parent and not Whitelisted[player] then
+                pcall(render, player)
+            end
+            return
+        end
         if player == LocalPlayer and not Config.ShowOnSelf then return clear_esp(player) end
         -- Hide ESP for whitelisted players (friends / ignored)
         if Whitelisted[player] then return clear_esp(player) end
@@ -5341,16 +5417,16 @@ local function InitESP()
     end
 
     local function hookEspRespawn(plr)
-        if not plr or plr == LocalPlayer then return end
-        trackConn(plr.CharacterAdded:Connect(function()
-            -- Full redraw after respawn (knocked body is gone)
-            pcall(function() destroy_esp(plr) end)
-            task.defer(function()
-                if not Alive or not Config.Enabled then return end
-                if plr.Parent then pcall(render, plr) end
-            end)
-        end))
-    end
+    if not plr or plr == LocalPlayer then return end
+    trackConn(plr.CharacterAdded:Connect(function()
+        pcall(function() destroy_esp(plr) end)
+        task.defer(function()
+            if not Alive then return end
+            -- Always re-render; update() handles visibility based on Config.Enabled
+            if plr.Parent then pcall(render, plr) end
+        end)
+    end))
+end
     for _, p in ipairs(Players:GetPlayers()) do
         render(p)
         hookEspRespawn(p)
@@ -5382,6 +5458,14 @@ local function InitESP()
         local doGrad  = espFrame % 12 == 0
         local doClean = espFrame % 90 == 0
         if doGrad then updateBarGradientsLocal() end
+        -- Self-heal: every ~1s re-render any non-whitelisted player missing from cache
+        if espFrame % 60 == 0 then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and not Whitelisted[p] and not ESPCache[p] then
+                    pcall(render, p)
+                end
+            end
+        end
 
         local n = 0
         for p in pairs(ESPCache) do
